@@ -58,7 +58,7 @@ flags.DEFINE_bool("netvlad_add_batch_norm", True,
 
 
 
-flags.DEFINE_integer("iterations", 150, "Number of frames per batch for DBoF.")#30
+flags.DEFINE_integer("iterations", 150, "Number of frames per batch to select/ sequence length for LSTM network.")#30
 flags.DEFINE_bool("dbof_add_batch_norm", True,
                   "Adds batch normalization to the DBoF model.")
 flags.DEFINE_bool(
@@ -500,4 +500,107 @@ class CnnLstmMemoryModel(models.BaseModel):
         **unused_params)
 
 
+class LstmAttn():
+  def __init__(self, lstm_size,iterations,num_frames,feature_size,reduced_dim):
+    self.lstm_size = lstm_size
+    self.iterations=iterations
+    self.num_frames=num_frames
+    self.feature_size=feature_size
+    self.reduced_dim=reduced_dim
+  def forward(self,model_input):
+    number_of_layers = FLAGS.lstm_layers
 
+    seq_len=tf.ones_like(self.num_frames,dtype=tf.int32)*self.iterations
+
+    # outputs1, state1 = tf.nn.bidirectional_dynamic_rnn(stacked_lstm_fw, stacked_lstm_bw,
+    #                                                  model_input, sequence_length=seq_len, dtype=tf.float32)
+
+    stacked_lstm = tf.contrib.rnn.MultiRNNCell(
+            [tf.contrib.rnn.LSTMCell(self.lstm_size, forget_bias=1.0) 
+            for _ in range(number_of_layers)])
+
+    outputs, state = tf.nn.dynamic_rnn(stacked_lstm, model_input,
+                                       sequence_length=seq_len,
+                                       dtype=tf.float32)
+
+    attention = AttentionLayers(self.feature_size,self.iterations,self.reduced_dim)
+    
+    outputs = slim.batch_norm(
+        outputs,
+        center=True,
+        scale=True,
+        is_training=True,
+        scope="model_input_bn")
+
+    with tf.variable_scope("Attention"):
+        attention_vector = attention.forward(outputs) 
+    return attention_vector
+  
+class LstmModel(models.BaseModel):
+  def create_model(self, model_input, vocab_size, num_frames, **unused_params):
+    """Creates a model which uses a stack of LSTMs to represent the video.
+
+    Args:
+      model_input: A 'batch_size' x 'max_frames' x 'num_features' matrix of
+        input features.
+      vocab_size: The number of classes in the dataset.
+      num_frames: A vector of length 'batch' which indicates the number of
+        frames for each video (before padding).
+
+    Returns:
+      A dictionary with a tensor containing the probability predictions of the
+      model in the 'predictions' key. The dimensions of the tensor are
+      'batch_size' x 'num_classes'.
+    """
+    lstm_size = FLAGS.lstm_cells
+    number_of_layers = FLAGS.lstm_layers
+    iterations=FLAGS.iterations
+    # number_of_layers=1
+    num_frames_cast = tf.cast(tf.expand_dims(num_frames, 1), tf.float32)
+    model_input = utils.SampleRandomSequence(model_input, num_frames_cast,
+                                              iterations)
+
+
+    video_attention = LstmAttn(lstm_size,iterations,num_frames,1024,512)
+    audio_attention = LstmAttn(128,iterations,num_frames,128,64)
+
+    with tf.variable_scope("video_Attention"):
+        attention_video = video_attention.forward(model_input[:,:,0:1024]) 
+    # print('vlad_video is',vlad_video)
+    with tf.variable_scope("audio_Attention"):
+        attention_audio = audio_attention.forward(model_input[:,:,1024:])    
+
+
+    pooled=tf.concat([attention_video,attention_audio],axis=1)
+        # print('pooled is',pooled)
+    # pooled=attention_vector
+    dr2 = tf.get_variable("dr2",
+      [lstm_size+128,lstm_size+128],
+      initializer = tf.random_normal_initializer(stddev=1 / math.sqrt(lstm_size+128)))
+    pooled=tf.matmul(pooled,dr2)
+
+    pooled = slim.batch_norm(
+              pooled,
+              center=True,
+              scale=True,
+              is_training=True,
+              scope="pooled_bn")
+
+    gating_weights = tf.get_variable("gating_weights_2",
+      [lstm_size+128, lstm_size+128],
+      initializer = tf.random_normal_initializer(stddev=1 / math.sqrt(lstm_size+128)))     
+    gates = tf.matmul(pooled, gating_weights)     
+    gates = slim.batch_norm(
+        gates,
+        center=True,
+        scale=True,
+        is_training=True,
+        scope="gating_bn")
+    gates = tf.sigmoid(gates)
+    pooled = tf.multiply(pooled,gates)
+
+    aggregated_model = getattr(video_level_models,
+                               FLAGS.video_level_classifier_model)
+
+    return aggregated_model().create_model(
+        model_input=pooled, vocab_size=vocab_size, **unused_params)
