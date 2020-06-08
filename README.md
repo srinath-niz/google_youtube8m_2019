@@ -24,7 +24,7 @@ Team name: **Team Locust**
 - [LijunZhang](https://www.kaggle.com/lijunleozhang)
 - [Srinath Nizampatnam](https://www.kaggle.com/srinath1993)
 - [Ahana Gangopadhyay](https://www.kaggle.com/ahana91)
-- [Nanashi (you)](https://www.kaggle.com/jesucristo)
+- [Nanashi](https://www.kaggle.com/jesucristo)
 
 **Leaderboard**
 
